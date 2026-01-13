@@ -2,13 +2,13 @@ import argparse
 import collections
 import torch
 import numpy as np
-import data_loader.data_loaders as module_data
-import model.loss as module_loss
-import model.metric as module_metric
-import model.model as module_arch
-from parse_config import ConfigParser
-from trainer import Trainer
-from utils import prepare_device
+import viewpoint_diverse_training_diet.data_loader.data_loaders as module_data
+import viewpoint_diverse_training_diet.losses as module_loss
+import viewpoint_diverse_training_diet.metrics as module_metric
+import viewpoint_diverse_training_diet.models.base_model as module_arch
+from viewpoint_diverse_training_diet.parse_config import ConfigParser
+from viewpoint_diverse_training_diet.trainer import Trainer
+from viewpoint_diverse_training_diet.utils import prepare_device
 
 
 # fix random seeds for reproducibility

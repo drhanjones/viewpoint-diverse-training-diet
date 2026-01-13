@@ -45,6 +45,10 @@
         "monitor": "min val_loss",
         "early_stop": 10,
 
-        "tensorboard": true
+        "wandb": {
+            "project": "viewpoint-diverse-training-diet",
+            "name": "mnist-lenet-experiment",
+            "config": {}
+        }
     }
 }
