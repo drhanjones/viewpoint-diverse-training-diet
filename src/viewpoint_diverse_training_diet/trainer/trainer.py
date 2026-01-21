@@ -3,14 +3,14 @@ import torch
 from abc import abstractmethod
 from numpy import inf
 from torchvision.utils import make_grid
+
 from viewpoint_diverse_training_diet.logger import WandbWriter
 from viewpoint_diverse_training_diet.utils import MetricTracker, inf_loop
 
 
 class BaseTrainer:
-    """
-    Base class for all trainers
-    """
+    """Base class for all trainers."""
+
     def __init__(self, model, criterion, metric_ftns, optimizer, config):
         self.config = config
         self.logger = config.get_logger('trainer', config['trainer']['verbosity'])
@@ -42,7 +42,7 @@ class BaseTrainer:
 
         self.checkpoint_dir = config.save_dir
 
-        # setup visualization writer instance                
+        # setup visualization writer instance
         self.writer = WandbWriter(config.log_dir, self.logger, cfg_trainer.get('wandb', {}))
 
         if config.resume is not None:
@@ -100,6 +100,8 @@ class BaseTrainer:
 
             if epoch % self.save_period == 0:
                 self._save_checkpoint(epoch, save_best=best)
+        if self.writer.enabled:
+            self.writer.finish()
 
     def _save_checkpoint(self, epoch, save_best=False):
         """
@@ -243,7 +245,7 @@ class Trainer(BaseTrainer):
                     self.valid_metrics.update(met.__name__, met(output, target))
                 self.writer.add_image('input', make_grid(data.cpu(), nrow=8, normalize=True))
 
-        # add histogram of model parameters to the tensorboard
+        # add histogram of model parameters to the monitoring backend
         for name, p in self.model.named_parameters():
             self.writer.add_histogram(name, p, bins='auto')
         return self.valid_metrics.result()

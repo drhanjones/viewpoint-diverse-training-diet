@@ -1,9 +1,13 @@
 import json
-import torch
-import pandas as pd
-from pathlib import Path
-from itertools import repeat
+import os
+import random
 from collections import OrderedDict
+from itertools import repeat
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
 
 
 def ensure_dir(dirname):
@@ -43,6 +47,28 @@ def prepare_device(n_gpu_use):
     list_ids = list(range(n_gpu_use))
     return device, list_ids
 
+
+def seed_everything(seed, deterministic=False):
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 class MetricTracker:
     def __init__(self, *keys, writer=None):
         self.writer = writer
@@ -65,3 +91,23 @@ class MetricTracker:
 
     def result(self):
         return dict(self._data.average)
+
+    def synchronize_between_processes(self):
+        try:
+            import torch.distributed as dist
+        except ImportError:  # pragma: no cover - optional dependency
+            return
+
+        if not (dist.is_available() and dist.is_initialized()):
+            return
+
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        for key in self._data.index:
+            totals = torch.tensor([
+                self._data.total[key],
+                self._data.counts[key]
+            ], device=device, dtype=torch.float64)
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+            self._data.total[key] = totals[0].item()
+            self._data.counts[key] = max(totals[1].item(), 1.0)
+            self._data.average[key] = self._data.total[key] / self._data.counts[key]

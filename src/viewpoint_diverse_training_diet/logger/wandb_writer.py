@@ -2,23 +2,37 @@ import wandb
 
 
 class WandbWriter:
-    """
-    Wandb writer class for logging metrics, images, and histograms
-    """
+    """Thin wrapper around Weights & Biases logging."""
+
     def __init__(self, log_dir, logger, cfg_wandb):
+        cfg = cfg_wandb or {}
         self.logger = logger
-        self.enabled = cfg_wandb
+        self.run = None
+        self.enabled = cfg.get('enabled', True)
         self.step = 0
         self.mode = ''
-        
-        if self.enabled:
-            wandb.init(
-                project=cfg_wandb.get('project', 'viewpoint-diverse-training'),
-                name=cfg_wandb.get('name', None),
-                config=cfg_wandb.get('config', {}),
-                dir=str(log_dir)
+
+        if not self.enabled:
+            return
+
+        init_kwargs = {
+            'project': cfg.get('project', 'viewpoint-diverse-training'),
+            'name': cfg.get('name'),
+            'config': cfg.get('config', {}),
+            'dir': str(log_dir),
+        }
+
+        try:
+            self.run = wandb.init(**init_kwargs)
+            self.logger.info(
+                "Wandb initialized. Project: %s, Run: %s",
+                self.run.project,
+                self.run.name,
             )
-            self.logger.info(f"Wandb initialized. Project: {wandb.run.project}, Run: {wandb.run.name}")
+        except Exception as exc:  # pragma: no cover - wandb runtime failure
+            self.logger.warning("Failed to initialize wandb: %s", exc)
+            self.enabled = False
+            self.run = None
 
     def set_step(self, step, mode='train'):
         """Set the current step for logging"""
