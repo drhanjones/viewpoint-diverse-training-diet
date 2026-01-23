@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import models, transforms
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm 
+from tqdm.auto import tqdm
 from viewpoint_diverse_training_diet.data_loader.webdataset_loader import (
     WebDatasetLoader,
 )
@@ -24,22 +24,26 @@ def train_one_epoch(model, loader, optimizer, device):
     total, correct, loss_sum = 0, 0, 0.0
 
     for i, (x, y) in tqdm(enumerate(loader)):
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+        x = x.to(device)
+        y = y.to(device)
 
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
-        loss = nn.functional.cross_entropy(logits, y)
+        print(f"Logits shape: {logits.shape}, y shape: {y.unsqueeze(1).shape}")
+        print(y)
+        print(f"x shape: {x.shape}")
+        loss = nn.functional.cross_entropy(logits, y.unsqueeze(1))
+
         loss.backward()
         optimizer.step()
 
         loss_sum += loss.item() * x.size(0)
-        correct += (logits.argmax(1) == y).sum().item()
+        correct += (logits.argmax(1) == y.squeeze()).sum().item()
         total += x.size(0)
 
         if (i + 1) % 50 == 0:
             print(
-                f"  Batch {i+1:04d} | "
+                f"  Batch {i + 1:04d} | "
                 f"train loss {loss_sum / total:.4f} acc {correct / total:.4f}"
             )
 
@@ -79,6 +83,7 @@ def run_training(
 
     # Initialize wandb
     if use_wandb:
+        print("Initializing wandb...")
         wandb.init(
             project=wandb_project,
             name=wandb_name,
@@ -90,7 +95,7 @@ def run_training(
                 "learning_rate": lr,
                 "optimizer": "Adam",
                 "device": device,
-            }
+            },
         )
 
     model = make_vgg16(num_classes).to(device)
@@ -113,13 +118,15 @@ def run_training(
 
         # Log metrics to wandb
         if use_wandb:
-            wandb.log({
-                "epoch": epoch,
-                "train/loss": tr_loss,
-                "train/accuracy": tr_acc,
-                "val/loss": va_loss,
-                "val/accuracy": va_acc,
-            })
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "train/loss": tr_loss,
+                    "train/accuracy": tr_acc,
+                    "val/loss": va_loss,
+                    "val/accuracy": va_acc,
+                }
+            )
 
     if use_wandb:
         wandb.finish()
@@ -131,22 +138,32 @@ from pathlib import Path
 
 
 def main():
-    DATASET_PATH = Path("/path/to/webdataset")  # TODO: set your dataset path
-    METADATA_PATH = Path("/path/to/metadata.xlsx")  # TODO: set your metadata path
+    DATASET_PATH = Path("/scratch-shared/athamma1/diverse_viewpoints_reshuffled_tmp")
+    KEY_TO_CATEGORY_MAPPER_PATH = Path(
+        "/home/athamma1/Projects/viewpoint_diversity_3d/3D-object-viewpoint-diversity/assets/key_to_category_mapper.json.gz"
+    )
+
+    assert DATASET_PATH.exists(), f"Dataset path {DATASET_PATH} does not exist."
+    assert KEY_TO_CATEGORY_MAPPER_PATH.exists(), (
+        f"Key to category mapper path {KEY_TO_CATEGORY_MAPPER_PATH} does not exist."
+    )
     NUM_CLASSES = 25
 
+    print("Initializing WebDatasetLoader...")
     wds_loader = WebDatasetLoader(
         dataset_path=DATASET_PATH,
-        metadata_path=METADATA_PATH,
+        key_to_category_mapper_path=KEY_TO_CATEGORY_MAPPER_PATH,
         seed=42,
         batch_size=32,
     )
+    print("WebDatasetLoader initialized.")
 
+    print("Starting training...")
     model = run_training(
         train_loader=wds_loader.train_dataloader,
         val_loader=wds_loader.val_dataloader,
         num_classes=NUM_CLASSES,
-        epochs=10,
+        epochs=2,
         lr=1e-3,
     )
 
@@ -158,3 +175,5 @@ def main():
         print(f"Model checkpoint saved to {checkpoint_path}")
 
 
+if __name__ == "__main__":
+    main()

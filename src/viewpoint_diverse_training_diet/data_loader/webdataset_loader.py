@@ -1,3 +1,5 @@
+from importlib.metadata import metadata
+import json
 import webdataset as wds
 import paramiko
 from typing import List, Tuple
@@ -9,6 +11,7 @@ import torch
 from torchvision import transforms
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
+import gzip
 
 
 class RemoteWebDatasetLoader:
@@ -83,7 +86,7 @@ class WebDatasetLoader:
     def __init__(
         self,
         dataset_path: Path,
-        metadata_path: Path,
+        key_to_category_mapper_path: Path,
         train_val_split: float = 0.8,
         seed: int = 42,
         batch_size: int = 32,
@@ -95,51 +98,43 @@ class WebDatasetLoader:
         self.train_urls, self.val_urls = self.shuffle_and_split_dataset(
             train_val_split, seed
         )
+        self.transforms = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+
+        self.key_to_category_mapper, self.label_encoder = self.build_label_encoder(
+            key_to_category_mapper_path=key_to_category_mapper_path
+        )
+
         self.train_dataset = (
             wds.WebDataset(self.train_urls, shardshuffle=False)
             .shuffle(1000)
             .decode("pil")
-            .to_tuple("png", "metadata.json")
+            .to_tuple("png", "metadata.json", "__key__")
+            .map(self.build_sample)
         )
 
         self.val_dataset = (
             wds.WebDataset(self.val_urls, shardshuffle=False)
             .decode("pil")
-            .to_tuple("png", "metadata.json")
-        )
-
-        self.metadata_dict, self.label_encoder = self.load_metadata_dictionary(
-            metadata_path=metadata_path
-        )
-        self.train_tf = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
-        )
-
-        self.val_tf = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
+            .to_tuple("png", "metadata.json", "__key__")
+            .map(self.build_sample)
         )
 
         self.train_dataloader = DataLoader(
             self.train_dataset,
             batch_size=batch_size,
             pin_memory=True,
-            collate_fn=lambda b: self.collate_wds(b, self.train_tf, self.metadata_dict, label_key="object_name"),
         )
         self.val_dataloader = DataLoader(
             self.val_dataset,
             batch_size=batch_size,
             pin_memory=True,
-            collate_fn=lambda b: self.collate_wds(b, self.val_tf, self.metadata_dict, label_key="object_name"),
         )
 
     def shuffle_and_split_dataset(
@@ -155,31 +150,51 @@ class WebDatasetLoader:
         val_urls = shuffled_urls[split_index:]
         return train_urls, val_urls
 
-    def collate_wds(self, batch, tf, metadata_dict, label_key="object_name"):
-        """batch: list of (PIL_image, metadata_dict) from WebDataset"""
-        images, metas = zip(*batch)
-        x = torch.stack([tf(im.convert("RGB")) for im in images], dim=0)
-        y = torch.tensor([metadata_dict[m[label_key]] for m in metas], dtype=torch.long)
-        return x, y
+    # def collate_wds(self, batch, tf, metadata_dict, label_key="object_name"):
+    #     """batch: list of (PIL_image, metadata_dict) from WebDataset"""
+    #     images, metas = zip(*batch)
+    #     x = torch.stack([tf(im.convert("RGB")) for im in images], dim=0)
+    #     y = torch.tensor([metadata_dict[m[label_key]] for m in metas], dtype=torch.long)
+    #     return x, y
 
-    def load_metadata_dictionary(
-        self, metadata_path: Path
+    def build_label_encoder(
+        self, key_to_category_mapper_path: Path
     ) -> Tuple[dict, LabelEncoder]:
-        metadata_df = pd.read_excel(
-            metadata_path, engine="openpyxl", sheet_name="object_metadata_registry"
-        )
+        with gzip.open(key_to_category_mapper_path, "rt") as f:
+            key_to_category_mapper = json.load(f)
 
-        metadata_df = (
-            metadata_df[["object_name", "category"]]
-            .sort_values(by="category")
-            .reset_index(drop=True)
-        )
+        categories = list(set(key_to_category_mapper.values()))
+        categories = sorted(categories)
 
         label_encoder = LabelEncoder()
-        metadata_df["label"] = label_encoder.fit_transform(metadata_df["category"])
+        label_encoder.fit(categories)
 
-        metadata_dict = dict(zip(metadata_df["object_name"], metadata_df["label"]))
+        return key_to_category_mapper, label_encoder
 
-        return metadata_dict, label_encoder
+    def build_sample(self, sample):
+        sample_image, metadata_dict, sample_key = sample
 
+        x = self.transforms(sample_image)
+        y = self.key_to_category_mapper[sample_key]
 
+        return x, y
+
+    # def load_metadata_dictionary(
+    #     self, metadata_path: Path
+    # ) -> Tuple[dict, LabelEncoder]:
+    #     metadata_df = pd.read_excel(
+    #         metadata_path, engine="openpyxl", sheet_name="object_metadata_registry"
+    #     )
+
+    #     metadata_df = (
+    #         metadata_df[["object_name", "category"]]
+    #         .sort_values(by="category")
+    #         .reset_index(drop=True)
+    #     )
+
+    #     label_encoder = LabelEncoder()
+    #     metadata_df["label"] = label_encoder.fit_transform(metadata_df["category"])
+
+    #     metadata_dict = dict(zip(metadata_df["object_name"], metadata_df["label"]))
+
+    #     return metadata_dict, label_encoder
