@@ -150,20 +150,23 @@ class WebDatasetLoader:
         val_urls = shuffled_urls[split_index:]
         return train_urls, val_urls
 
-    # def collate_wds(self, batch, tf, metadata_dict, label_key="object_name"):
-    #     """batch: list of (PIL_image, metadata_dict) from WebDataset"""
-    #     images, metas = zip(*batch)
-    #     x = torch.stack([tf(im.convert("RGB")) for im in images], dim=0)
-    #     y = torch.tensor([metadata_dict[m[label_key]] for m in metas], dtype=torch.long)
-    #     return x, y
+    def collate_wds(self, batch):
+        images, labels = zip(*batch)
+        x = torch.stack(images, dim=0)
+        y = torch.tensor(labels, dtype=torch.long)
+        return x, y
 
     def build_label_encoder(
         self, key_to_category_mapper_path: Path
     ) -> Tuple[dict, LabelEncoder]:
+        
         with gzip.open(key_to_category_mapper_path, "rt") as f:
             key_to_category_mapper = json.load(f)
 
         categories = list(set(key_to_category_mapper.values()))
+        print(f"Categories before cleaning: {categories}")
+        categories = [x for x in categories if x is not None and x!="None"]
+        print(f"Categories after cleaning: {categories}")
         categories = sorted(categories)
 
         label_encoder = LabelEncoder()
@@ -175,7 +178,11 @@ class WebDatasetLoader:
         sample_image, metadata_dict, sample_key = sample
 
         x = self.transforms(sample_image)
-        y = self.key_to_category_mapper[sample_key]
+        # print(f"Sample key: {sample_key}, Label: {repr(self.key_to_category_mapper.get(sample_key))}")
+        y = self.key_to_category_mapper.get(sample_key)
+        if y is None:
+            y="basket"  # Temporary fix for bug in data for basket class
+        y = self.label_encoder.transform([y])[0] #Some bug in data for basket class, temporary fix
 
         return x, y
 

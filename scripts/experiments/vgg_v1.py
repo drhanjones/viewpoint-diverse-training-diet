@@ -29,10 +29,10 @@ def train_one_epoch(model, loader, optimizer, device):
 
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
-        print(f"Logits shape: {logits.shape}, y shape: {y.unsqueeze(1).shape}")
-        print(y)
-        print(f"x shape: {x.shape}")
-        loss = nn.functional.cross_entropy(logits, y.unsqueeze(1))
+        # print(f"Logits shape: {logits.shape}, y shape: {y.unsqueeze(1).shape}")
+        # print(y)
+        # print(f"x shape: {x.shape}")
+        loss = nn.functional.cross_entropy(logits, y)
 
         loss.backward()
         optimizer.step()
@@ -140,7 +140,7 @@ from pathlib import Path
 def main():
     DATASET_PATH = Path("/scratch-shared/athamma1/diverse_viewpoints_reshuffled_tmp")
     KEY_TO_CATEGORY_MAPPER_PATH = Path(
-        "/home/athamma1/Projects/viewpoint_diversity_3d/3D-object-viewpoint-diversity/assets/key_to_category_mapper.json.gz"
+        "/home/athamma1/Projects/viewpoint_diversity_3d/3D-object-viewpoint-diversity/scripts/post_processing/reshuffle_shards/key_to_class_mapping.json.gz"
     )
 
     assert DATASET_PATH.exists(), f"Dataset path {DATASET_PATH} does not exist."
@@ -154,7 +154,7 @@ def main():
         dataset_path=DATASET_PATH,
         key_to_category_mapper_path=KEY_TO_CATEGORY_MAPPER_PATH,
         seed=42,
-        batch_size=32,
+        batch_size=64,
     )
     print("WebDatasetLoader initialized.")
 
