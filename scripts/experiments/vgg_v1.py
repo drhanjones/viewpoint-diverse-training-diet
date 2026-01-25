@@ -8,7 +8,7 @@ from viewpoint_diverse_training_diet.data_loader.webdataset_loader import (
     WebDatasetLoader,
 )
 import wandb
-
+import datetime
 
 # ---- model (FROM SCRATCH) ----
 def make_vgg16(num_classes: int):
@@ -19,7 +19,7 @@ def make_vgg16(num_classes: int):
 
 
 # ---- train/eval loops ----
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(model, loader, optimizer, device, epoch_number=0, log_wandb=False, log_wandb_interval=500):
     model.train()
     total, correct, loss_sum = 0, 0, 0.0
 
@@ -45,6 +45,17 @@ def train_one_epoch(model, loader, optimizer, device):
             print(
                 f"  Batch {i + 1:04d} | "
                 f"train loss {loss_sum / total:.4f} acc {correct / total:.4f}"
+            )
+        
+        if log_wandb and (i + 1) % log_wandb_interval == 0:
+            wandb.log(
+                {   
+                    "epoch": epoch_number,
+                    "train/batch/step": i + 1,
+                    "train/batch_loss": loss_sum / total,
+                    "train/batch_accuracy": correct / total,
+
+                }
             )
 
     return loss_sum / total, correct / total
@@ -107,7 +118,7 @@ def run_training(
 
     for epoch in range(1, epochs + 1):
         print(f"Epoch {epoch:02d} -------------------------------")
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, device)
+        tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, device, epoch_number=epoch, log_wandb=use_wandb, log_wandb_interval=500)
         va_loss, va_acc = evaluate(model, val_loader, device)
 
         print(
@@ -158,13 +169,15 @@ def main():
     )
     print("WebDatasetLoader initialized.")
 
+    datetime_now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     print("Starting training...")
     model = run_training(
         train_loader=wds_loader.train_dataloader,
         val_loader=wds_loader.val_dataloader,
         num_classes=NUM_CLASSES,
-        epochs=2,
+        epochs=5,
         lr=1e-3,
+        wandb_name=f"vgg16-from-scratch-{datetime_now}",
     )
 
     save_checkpoint = True
