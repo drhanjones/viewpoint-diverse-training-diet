@@ -1,16 +1,20 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import models, transforms
-from torch.utils.data import DataLoader
+from torchvision import models
 from tqdm.auto import tqdm
 from viewpoint_diverse_training_diet.data_loader.webdataset_loader import (
+    DistributedWebDatasetLoader,
     WebDatasetLoader,
 )
 import wandb
 import datetime
+from pathlib import Path
+import os
+from torch.distributed import init_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-# ---- model (FROM SCRATCH) ----
+
 def make_vgg16(num_classes: int):
     model = models.vgg16(weights=None)
     in_features = model.classifier[6].in_features
@@ -18,134 +22,113 @@ def make_vgg16(num_classes: int):
     return model
 
 
-# ---- train/eval loops ----
-def train_one_epoch(model, loader, optimizer, device, epoch_number=0, log_wandb=False, log_wandb_interval=500):
-    model.train()
-    total, correct, loss_sum = 0, 0, 0.0
-
-    for i, (x, y) in tqdm(enumerate(loader)):
-        x = x.to(device)
-        y = y.to(device)
-
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(x)
-        # print(f"Logits shape: {logits.shape}, y shape: {y.unsqueeze(1).shape}")
-        # print(y)
-        # print(f"x shape: {x.shape}")
-        loss = nn.functional.cross_entropy(logits, y)
-
-        loss.backward()
-        optimizer.step()
-
-        loss_sum += loss.item() * x.size(0)
-        correct += (logits.argmax(1) == y.squeeze()).sum().item()
-        total += x.size(0)
-
-        if (i + 1) % 50 == 0:
-            print(
-                f"  Batch {i + 1:04d} | "
-                f"train loss {loss_sum / total:.4f} acc {correct / total:.4f}"
-            )
-        
-        if log_wandb and (i + 1) % log_wandb_interval == 0:
-            wandb.log(
-                {   
-                    "epoch": epoch_number,
-                    "train/batch/step": i + 1,
-                    "train/batch_loss": loss_sum / total,
-                    "train/batch_accuracy": correct / total,
-
-                }
-            )
-
-    return loss_sum / total, correct / total
-
-
-@torch.no_grad()
-def evaluate(model, loader, device):
+def validate(model, val_loader, device, ddp, criterion):
+    """All ranks validate on their portion of data"""
     model.eval()
-    total, correct, loss_sum = 0, 0, 0.0
 
-    for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+    val_loss = 0.0
+    correct = 0
+    total = 0
 
-        logits = model(x)
-        loss = nn.functional.cross_entropy(logits, y)
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
-        loss_sum += loss.item() * x.size(0)
-        correct += (logits.argmax(1) == y).sum().item()
-        total += x.size(0)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
 
-    return loss_sum / total, correct / total
+            val_loss += loss.item() * images.size(0)  # Weighted by batch size
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+    # Reduce metrics across all ranks
+    if ddp:
+        # Sum losses and counts across all GPUs
+        metrics = torch.tensor([val_loss, correct, total], device=device)
+        torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
+        val_loss, correct, total = metrics.tolist()
+
+    avg_loss = val_loss / total
+    accuracy = 100.0 * correct / total
+
+    return avg_loss, accuracy
 
 
-def run_training(
-    train_loader: torch.utils.data.DataLoader,
-    val_loader: torch.utils.data.DataLoader,
-    num_classes: int,
-    epochs: int = 10,
-    lr: float = 1e-3,
+def train(
+    model: nn.Module,
+    dataloader: WebDatasetLoader | DistributedWebDatasetLoader,
+    criterion,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    n_epoch: int,
+    ddp: bool,
+    is_master: bool,
     use_wandb: bool = True,
-    wandb_project: str = "viewpoint-diverse-training-diet",
-    wandb_name: str = "vgg16-from-scratch",
+    logging_interval: int = 100,
 ):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Initialize wandb
-    if use_wandb:
-        print("Initializing wandb...")
-        wandb.init(
-            project=wandb_project,
-            name=wandb_name,
-            entity="curriculum-of-vision",
-            config={
-                "architecture": "VGG16",
-                "num_classes": num_classes,
-                "epochs": epochs,
-                "learning_rate": lr,
-                "optimizer": "Adam",
-                "device": device,
-            },
-        )
+    model.train()
+    train_loader = dataloader.train_dataloader
+    val_loader = dataloader.val_dataloader
 
-    model = make_vgg16(num_classes).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    for epoch in range(n_epoch):
+        print(f"Epoch {epoch + 1}/{n_epoch}")
+        epoch_loss = 0.0
+        num_batches = 0
 
-    # Log model to wandb
-    if use_wandb:
-        wandb.watch(model, log="all", log_freq=100)
+        for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader)):
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
 
-    for epoch in range(1, epochs + 1):
-        print(f"Epoch {epoch:02d} -------------------------------")
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, device, epoch_number=epoch, log_wandb=use_wandb, log_wandb_interval=500)
-        va_loss, va_acc = evaluate(model, val_loader, device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
 
-        print(
-            f"Epoch {epoch:02d} | "
-            f"train loss {tr_loss:.4f} acc {tr_acc:.4f} | "
-            f"val loss {va_loss:.4f} acc {va_acc:.4f}"
-        )
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            num_batches += 1
 
-        # Log metrics to wandb
-        if use_wandb:
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "train/loss": tr_loss,
-                    "train/accuracy": tr_acc,
-                    "val/loss": va_loss,
-                    "val/accuracy": va_acc,
-                }
-            )
+            if use_wandb and (batch_idx + 1) % logging_interval == 0:
+                if is_master:
+                    wandb.log(
+                        {
+                            "batch/train_loss": loss.item(),
+                            "batch/avg_loss": epoch_loss / num_batches,
+                        }
+                    )
+            elif (batch_idx + 1) % logging_interval == 0:
+                print(f"Batch {batch_idx + 1}, loss: {loss.item():.4f}")
+
+        # avg_epoch_loss = epoch_loss / num_batches
+        # print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}")
+        if ddp:
+            loss_tensor = torch.tensor(epoch_loss, device=device)
+            torch.distributed.all_reduce(loss_tensor)
+            epoch_loss = loss_tensor.item() / torch.distributed.get_world_size()
+
+        avg_epoch_loss = epoch_loss / num_batches
+        print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}")
+
+        # Validate after each epoch
+        val_loss, val_accuracy = validate(model, val_loader, device, ddp, criterion)
+        if is_master:
+            print(f"  Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.2f}%")
+            if use_wandb:
+                wandb.log(
+                    {
+                        "epoch": epoch + 1,
+                        "val/loss": val_loss,
+                        "val/accuracy": val_accuracy,
+                    }
+                )
 
     if use_wandb:
         wandb.finish()
 
     return model
-
-
-from pathlib import Path
 
 
 def main():
@@ -158,33 +141,105 @@ def main():
     assert KEY_TO_CATEGORY_MAPPER_PATH.exists(), (
         f"Key to category mapper path {KEY_TO_CATEGORY_MAPPER_PATH} does not exist."
     )
-    NUM_CLASSES = 25
+    # NUM_CLASSES = 25
 
-    print("Initializing WebDatasetLoader...")
-    wds_loader = WebDatasetLoader(
-        dataset_path=DATASET_PATH,
-        key_to_category_mapper_path=KEY_TO_CATEGORY_MAPPER_PATH,
-        seed=42,
-        batch_size=64,
-    )
-    print("WebDatasetLoader initialized.")
+    ddp = int(os.environ.get("RANK", -1)) != -1
 
+    if ddp:
+        init_process_group(backend="nccl")
+        ddp_rank = int(os.environ["RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
+        ddp_local_rank = int(os.environ["LOCAL_RANK"])
+
+        device = torch.device(
+            f"cuda:{ddp_local_rank}" if torch.cuda.is_available() else "cpu"
+        )
+        master_process = ddp_rank == 0
+        seed_offset = ddp_rank
+        torch.accelerator.set_device_index(ddp_local_rank)
+        torch.manual_seed(42 + seed_offset)
+        wds_loader = DistributedWebDatasetLoader(
+            dataset_path=DATASET_PATH,
+            key_to_category_mapper_path=KEY_TO_CATEGORY_MAPPER_PATH,
+            seed=42,
+            batch_size=64,
+            num_workers=8,
+            train_val_split=0.9,
+            rank=ddp_rank,
+            world_size=ddp_world_size,
+        )
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        master_process = True
+        seed_offset = 0
+        ddp_rank = 0
+        ddp_world_size = 1
+        ddp_local_rank = 0
+        torch.manual_seed(42 + seed_offset)
+        wds_loader = WebDatasetLoader(
+            dataset_path=DATASET_PATH,
+            key_to_category_mapper_path=KEY_TO_CATEGORY_MAPPER_PATH,
+            seed=42,
+            batch_size=64,
+            train_val_split=0.9,
+        )
+
+    NUM_CLASSES = wds_loader.get_num_classes()
     datetime_now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    model = make_vgg16(NUM_CLASSES)
+    model = model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss()
+
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+    
+
     print("Starting training...")
-    model = run_training(
-        train_loader=wds_loader.train_dataloader,
-        val_loader=wds_loader.val_dataloader,
-        num_classes=NUM_CLASSES,
-        epochs=5,
-        lr=1e-3,
-        wandb_name=f"vgg16-from-scratch-{datetime_now}",
+    use_wandb = True
+
+    if use_wandb and master_process:
+        wandb.init(
+            project="viewpoint-diverse-training-diet",
+            name=f"vgg16-from-scratch-{datetime_now}-ddp{ddp_world_size}",
+            entity="curriculum-of-vision",
+            config={
+                "architecture": "VGG16",
+                "num_classes": NUM_CLASSES,
+                "optimizer": "Adam",
+                "learning_rate": 1e-3,
+                "batch_size": 64 * ddp_world_size,
+                "device": str(device),
+                "ddp_world_size": ddp_world_size,
+            },
+        )
+
+        wandb.watch(model, log="all", log_freq=100)
+
+    model = train(
+        model=model,
+        dataloader=wds_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        n_epoch=10,
+        ddp=ddp,
+        is_master=master_process,
+        use_wandb=use_wandb,
     )
+
+    raw_model = model.module if ddp else model
+
 
     save_checkpoint = True
 
-    if save_checkpoint:
+    if ddp:
+        torch.distributed.barrier()
+
+    if save_checkpoint and master_process:
         checkpoint_path = Path("./vgg16_from_scratch.pth")
-        torch.save(model.state_dict(), checkpoint_path)
+        torch.save(raw_model.state_dict(), checkpoint_path)
         print(f"Model checkpoint saved to {checkpoint_path}")
 
 

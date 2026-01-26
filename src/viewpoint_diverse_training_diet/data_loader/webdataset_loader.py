@@ -1,4 +1,3 @@
-from importlib.metadata import metadata
 import json
 import webdataset as wds
 import paramiko
@@ -7,11 +6,11 @@ from pathlib import Path
 import random
 from copy import deepcopy
 from torch.utils.data import DataLoader
-import torch
 from torchvision import transforms
-import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 import gzip
+
+PathLike = str | Path
 
 
 class RemoteWebDatasetLoader:
@@ -90,10 +89,11 @@ class WebDatasetLoader:
         train_val_split: float = 0.8,
         seed: int = 42,
         batch_size: int = 32,
+        build_dataloaders: bool = True,
     ):
         self.dataset_path: Path = dataset_path
-        self.urls: List[Path] | List[str] = sorted(self.dataset_path.glob("*.tar"))
-        self.urls = ["file://" + str(url) for url in self.urls]
+        url_paths: List[Path] = sorted(self.dataset_path.glob("*.tar"))
+        self.urls: List[str] = ["file://" + str(url) for url in url_paths]
 
         self.train_urls, self.val_urls = self.shuffle_and_split_dataset(
             train_val_split, seed
@@ -111,61 +111,56 @@ class WebDatasetLoader:
             key_to_category_mapper_path=key_to_category_mapper_path
         )
 
-        self.train_dataset = (
-            wds.WebDataset(self.train_urls, shardshuffle=False)
+        if build_dataloaders:
+            self.build_dataloaders(batch_size)
+
+    def build_dataloaders(self, batch_size: int):
+        train_dataset = (
+            wds.WebDataset(self.train_urls, shardshuffle=False)  # type: ignore
             .shuffle(1000)
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
         )
 
-        self.val_dataset = (
-            wds.WebDataset(self.val_urls, shardshuffle=False)
+        val_dataset = (
+            wds.WebDataset(self.val_urls, shardshuffle=False)  # type: ignore
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
         )
 
         self.train_dataloader = DataLoader(
-            self.train_dataset,
+            train_dataset,
             batch_size=batch_size,
             pin_memory=True,
         )
         self.val_dataloader = DataLoader(
-            self.val_dataset,
+            val_dataset,
             batch_size=batch_size,
             pin_memory=True,
         )
 
     def shuffle_and_split_dataset(
         self, train_val_split: float = 0.8, seed: int = 42
-    ) -> Tuple[List[str] | List[Path], List[str] | List[Path]]:
-        shuffled_urls = deepcopy(self.urls)
-
+    ) -> Tuple[List[str], List[str]]:
+        shuffled_urls = self.urls.copy()
         rng = random.Random(seed)
         rng.shuffle(shuffled_urls)
-
         split_index = int(len(shuffled_urls) * train_val_split)
         train_urls = shuffled_urls[:split_index]
         val_urls = shuffled_urls[split_index:]
         return train_urls, val_urls
 
-    def collate_wds(self, batch):
-        images, labels = zip(*batch)
-        x = torch.stack(images, dim=0)
-        y = torch.tensor(labels, dtype=torch.long)
-        return x, y
-
     def build_label_encoder(
         self, key_to_category_mapper_path: Path
     ) -> Tuple[dict, LabelEncoder]:
-        
         with gzip.open(key_to_category_mapper_path, "rt") as f:
             key_to_category_mapper = json.load(f)
 
         categories = list(set(key_to_category_mapper.values()))
         print(f"Categories before cleaning: {categories}")
-        categories = [x for x in categories if x is not None and x!="None"]
+        categories = [x for x in categories if x is not None and x != "None"]
         print(f"Categories after cleaning: {categories}")
         categories = sorted(categories)
 
@@ -181,27 +176,99 @@ class WebDatasetLoader:
         # print(f"Sample key: {sample_key}, Label: {repr(self.key_to_category_mapper.get(sample_key))}")
         y = self.key_to_category_mapper.get(sample_key)
         if y is None:
-            y="basket"  # Temporary fix for bug in data for basket class
-        y = self.label_encoder.transform([y])[0] #Some bug in data for basket class, temporary fix
+            y = "basket"  # Temporary fix for bug in data for basket class
+        y = self.label_encoder.transform([y])[
+            0
+        ]  # Some bug in data for basket class, temporary fix
 
         return x, y
 
-    # def load_metadata_dictionary(
-    #     self, metadata_path: Path
-    # ) -> Tuple[dict, LabelEncoder]:
-    #     metadata_df = pd.read_excel(
-    #         metadata_path, engine="openpyxl", sheet_name="object_metadata_registry"
-    #     )
+    def get_num_classes(self) -> int:
+        return len(self.label_encoder.classes_)
 
-    #     metadata_df = (
-    #         metadata_df[["object_name", "category"]]
-    #         .sort_values(by="category")
-    #         .reset_index(drop=True)
-    #     )
 
-    #     label_encoder = LabelEncoder()
-    #     metadata_df["label"] = label_encoder.fit_transform(metadata_df["category"])
+class DistributedWebDatasetLoader(WebDatasetLoader):
+    def __init__(
+        self,
+        dataset_path: Path,
+        key_to_category_mapper_path: Path,
+        rank: int,
+        world_size: int,
+        train_val_split: float = 0.8,
+        seed: int = 42,
+        batch_size: int = 32,
+        num_workers: int = 4,
+    ):
+        self.rank = rank
+        self.world_size = world_size
 
-    #     metadata_dict = dict(zip(metadata_df["object_name"], metadata_df["label"]))
+        super().__init__(
+            dataset_path=dataset_path,
+            key_to_category_mapper_path=key_to_category_mapper_path,
+            train_val_split=train_val_split,
+            seed=seed,
+            batch_size=batch_size,
+            build_dataloaders=False,
+        )
 
-    #     return metadata_dict, label_encoder
+        self.build_dataloaders_with_rank(batch_size, num_workers)
+
+        if self.rank == 0:
+            print(
+                f"DDP: {self.world_size} ranks, {len(self.train_urls)} train shards, {len(self.val_urls)} val shards"
+            )
+
+    def shuffle_and_split_dataset(self, train_val_split: float = 0.8, seed: int = 42):
+        """Override to split by rank after train/val split"""
+        train_urls, val_urls = super().shuffle_and_split_dataset(train_val_split, seed)
+
+        # Split by rank
+        train_urls = self.get_shards_for_rank(train_urls)
+        val_urls = self.get_shards_for_rank(val_urls)
+
+        return train_urls, val_urls
+
+    def get_shards_for_rank(self, urls: List[str]) -> List[str]:
+        """Distribute shards among ranks as evenly as possible."""
+        if self.world_size == 1:
+            return urls
+
+        rank_urls = urls[self.rank :: self.world_size]
+
+        return rank_urls
+
+    def build_dataloaders_with_rank(self, batch_size: int, num_workers: int):
+        """Rebuild dataloaders with num_workers and proper batching"""
+
+        # Train loader
+        train_dataset = (
+            wds.WebDataset(self.train_urls, shardshuffle=True)  # type: ignore
+            .shuffle(1000)
+            .decode("pil")
+            .to_tuple("png", "metadata.json", "__key__")
+            .map(self.build_sample)
+        )
+
+        self.train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
+
+        # Val loader
+        val_dataset = (
+            wds.WebDataset(self.val_urls, shardshuffle=False)  # type: ignore
+            .decode("pil")
+            .to_tuple("png", "metadata.json", "__key__")
+            .map(self.build_sample)
+        )
+
+        self.val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
