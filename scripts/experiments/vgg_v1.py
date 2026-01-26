@@ -223,15 +223,13 @@ def main():
         criterion=criterion,
         optimizer=optimizer,
         device=device,
-        n_epoch=10,
+        n_epoch=5,
         ddp=ddp,
         is_master=master_process,
         use_wandb=use_wandb,
     )
 
     raw_model = model.module if ddp else model
-
-
     save_checkpoint = True
 
     if ddp:

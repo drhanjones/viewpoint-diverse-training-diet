@@ -4,7 +4,7 @@
 #SBATCH --gpus=4
 #SBATCH --cpus-per-task=72
 #SBATCH --partition=gpu_a100
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/home/%u/logs/%j.log
 #SBATCH --error=/home/%u/logs/%j.log
 
