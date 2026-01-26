@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from sklearn.preprocessing import LabelEncoder
 import gzip
+from webdataset import split_by_node
+
 
 PathLike = str | Path
 
@@ -242,7 +244,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
 
         # Train loader
         train_dataset = (
-            wds.WebDataset(self.train_urls, shardshuffle=True)  # type: ignore
+            wds.WebDataset(self.train_urls, shardshuffle=True, nodesplitter=split_by_node)  # type: ignore
             .shuffle(1000)
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
@@ -259,7 +261,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
 
         # Val loader
         val_dataset = (
-            wds.WebDataset(self.val_urls, shardshuffle=False)  # type: ignore
+            wds.WebDataset(self.val_urls, shardshuffle=False, nodesplitter=split_by_node)  # type: ignore
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
