@@ -110,10 +110,10 @@ def train(
                 if is_root_process:
                     wandb.log(
                         {
-                            "batch/train_loss": loss.item(),
-                            "batch/moving_avg_loss": epoch_loss / total_samples,
-                            "batch/train_accuracy": 100.0 * corrects / inputs.size(0),
-                            "batch/moving_avg_accuracy": 100.0
+                            "batch/minibatch_loss": loss.item(),
+                            "batch/moving_avg_minibatch_loss": epoch_loss / total_samples,
+                            "batch/minibatch_accuracy": 100.0 * corrects / inputs.size(0),
+                            "batch/moving_avg_minibatch_accuracy": 100.0
                             * epoch_corrects
                             / total_samples,
                         }
@@ -123,7 +123,7 @@ def train(
                     )
             elif (batch_idx + 1) % logging_interval == 0:
                 print(
-                    f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}% \n"
+                    f"Batch {batch_idx + 1}, minibatch loss: {loss.item():.4f}, minibatch accuracy: {100.0 * corrects / inputs.size(0):.2f}% \n"
                 )
         print(f"Completed epoch {epoch + 1} on Rank {os.environ.get('RANK', 'N/A')} \n")
 
@@ -135,10 +135,18 @@ def train(
             torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
             epoch_loss, epoch_corrects, total_samples = metrics.tolist()
 
+
+
+        val_loss, val_accuracy = validate(
+            model, val_dataloader, device, ddp, criterion, is_root_process
+        )
         if is_root_process:
             avg_epoch_loss = epoch_loss / total_samples
             print(
-                f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}, accuracy: {100.0 * epoch_corrects / total_samples:.2f}% \n"
+                f"  Epoch {epoch + 1} Train Epoch loss: {avg_epoch_loss:.4f}, Train Epoch Accuracy: {100.0 * epoch_corrects / total_samples:.2f}% \n"
+            )
+            print(
+                f"  Validation Epoch Loss: {val_loss:.4f}, Validation Epoch Accuracy: {val_accuracy:.2f}% \n"
             )
             if use_wandb:
                 wandb.log(
@@ -146,20 +154,6 @@ def train(
                         "epoch": epoch + 1,
                         "train/loss": avg_epoch_loss,
                         "train/accuracy": 100.0 * epoch_corrects / total_samples,
-                    }
-                )
-
-        val_loss, val_accuracy = validate(
-            model, val_dataloader, device, ddp, criterion, is_root_process
-        )
-        if is_root_process:
-            print(
-                f"  Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.2f}% \n"
-            )
-            if use_wandb:
-                wandb.log(
-                    {
-                        "epoch": epoch + 1,
                         "val/loss": val_loss,
                         "val/accuracy": val_accuracy,
                     }
