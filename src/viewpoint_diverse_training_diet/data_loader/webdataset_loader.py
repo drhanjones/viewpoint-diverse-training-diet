@@ -319,7 +319,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
             batch_size=None,
             num_workers=train_workers,
             pin_memory=True,
-            persistent_workers=num_workers > 0,
+            persistent_workers=train_workers > 0,
         ).with_epoch(total_sample_count[0] // (batch_size * self.world_size))
 
         # Val loader
@@ -336,9 +336,9 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
         self.val_dataloader = wds.WebLoader(
             val_dataset,
             batch_size=None,
-            num_workers=num_workers,
+            num_workers=val_workers,
             pin_memory=True,
-            persistent_workers=num_workers > 0,
+            persistent_workers=val_workers > 0,
         ).with_epoch(total_sample_count[1] // (batch_size * self.world_size))
 
 
