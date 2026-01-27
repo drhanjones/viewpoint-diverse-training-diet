@@ -58,7 +58,8 @@ def validate(model, val_loader, device, ddp, criterion):
 
 def train(
     model: nn.Module,
-    dataloader: WebDatasetLoader | DistributedWebDatasetLoader,
+    train_dataloader: torch.utils.data.DataLoader,
+    val_dataloader: torch.utils.data.DataLoader,
     criterion,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -70,15 +71,13 @@ def train(
 ):
 
     model.train()
-    train_loader = dataloader.train_dataloader
-    val_loader = dataloader.val_dataloader
 
     for epoch in range(n_epoch):
         print(f"Epoch {epoch + 1}/{n_epoch}")
         epoch_loss = 0.0
         num_batches = 0
 
-        for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader)):
+        for batch_idx, (inputs, targets) in enumerate(tqdm(train_dataloader)):
             inputs = inputs.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
 
@@ -113,7 +112,7 @@ def train(
         print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}")
 
         # Validate after each epoch
-        val_loss, val_accuracy = validate(model, val_loader, device, ddp, criterion)
+        val_loss, val_accuracy = validate(model, val_dataloader, device, ddp, criterion)
         if is_master:
             print(f"  Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.2f}%")
             if use_wandb:
@@ -143,6 +142,7 @@ def main():
     )
     # NUM_CLASSES = 25
 
+    TEST_SETUP = True
     ddp = int(os.environ.get("RANK", -1)) != -1
 
     if ddp:
@@ -167,6 +167,7 @@ def main():
             train_val_split=0.9,
             rank=ddp_rank,
             world_size=ddp_world_size,
+            test_setup=TEST_SETUP,
         )
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -219,11 +220,12 @@ def main():
 
     model = train(
         model=model,
-        dataloader=wds_loader,
+        train_dataloader=wds_loader.train_dataloader,
+        val_dataloader=wds_loader.val_dataloader,
         criterion=criterion,
         optimizer=optimizer,
         device=device,
-        n_epoch=5,
+        n_epoch=2,
         ddp=ddp,
         is_master=master_process,
         use_wandb=use_wandb,

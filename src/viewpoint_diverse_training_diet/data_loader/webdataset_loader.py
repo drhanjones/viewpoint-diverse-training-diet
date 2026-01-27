@@ -92,10 +92,13 @@ class WebDatasetLoader:
         seed: int = 42,
         batch_size: int = 32,
         build_dataloaders: bool = True,
+        test_setup: bool = False,
     ):
         self.dataset_path: Path = dataset_path
         url_paths: List[Path] = sorted(self.dataset_path.glob("*.tar"))
         self.urls: List[str] = ["file://" + str(url) for url in url_paths]
+        if test_setup:
+            self.urls = self.urls[:20]
 
         self.train_urls, self.val_urls = self.shuffle_and_split_dataset(
             train_val_split, seed
@@ -112,6 +115,7 @@ class WebDatasetLoader:
         self.key_to_category_mapper, self.label_encoder = self.build_label_encoder(
             key_to_category_mapper_path=key_to_category_mapper_path
         )
+        self.label_to_idx = {label: idx for idx, label in enumerate(self.label_encoder.classes_)}
 
         if build_dataloaders:
             self.build_dataloaders(batch_size)
@@ -126,7 +130,7 @@ class WebDatasetLoader:
         )
 
         val_dataset = (
-            wds.WebDataset(self.val_urls, shardshuffle=False)  # type: ignore
+            wds.WebDataset(self.val_urls, shardshuffle=False, nodesplitter = wds.split_by_worker)  # type: ignore
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
@@ -136,11 +140,15 @@ class WebDatasetLoader:
             train_dataset,
             batch_size=batch_size,
             pin_memory=True,
+            num_workers=8,
+            multiprocessing_context="fork"
         )
         self.val_dataloader = DataLoader(
             val_dataset,
             batch_size=batch_size,
             pin_memory=True,
+            num_workers=3,
+            multiprocessing_context="fork"
         )
 
     def shuffle_and_split_dataset(
@@ -179,9 +187,7 @@ class WebDatasetLoader:
         y = self.key_to_category_mapper.get(sample_key)
         if y is None:
             y = "basket"  # Temporary fix for bug in data for basket class
-        y = self.label_encoder.transform([y])[
-            0
-        ]  # Some bug in data for basket class, temporary fix
+        y = self.label_to_idx.get(y, 0)  # Some bug in data for basket class, temporary fix
 
         return x, y
 
@@ -200,6 +206,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
         seed: int = 42,
         batch_size: int = 32,
         num_workers: int = 4,
+        test_setup: bool = False,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -211,6 +218,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
             seed=seed,
             batch_size=batch_size,
             build_dataloaders=False,
+            test_setup=test_setup,
         )
 
         self.build_dataloaders_with_rank(batch_size, num_workers)
@@ -242,7 +250,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
     def build_dataloaders_with_rank(self, batch_size: int, num_workers: int):
         """Rebuild dataloaders with num_workers and proper batching"""
 
-        # Train loader
+
         train_dataset = (
             wds.WebDataset(self.train_urls, shardshuffle=True, nodesplitter=split_by_node)  # type: ignore
             .shuffle(1000)
