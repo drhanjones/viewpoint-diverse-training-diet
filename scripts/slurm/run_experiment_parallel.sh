@@ -7,6 +7,8 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=/home/%u/logs/%j.log
 #SBATCH --error=/home/%u/logs/%j.log
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user
 
 VENV_PATH="/home/athamma1/Projects/viewpoint-diverse-training-diet/.venv"
 SCRIPT_PATH="/home/athamma1/Projects/viewpoint-diverse-training-diet/scripts/experiments/vgg_v1.py"
