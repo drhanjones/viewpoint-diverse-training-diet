@@ -154,7 +154,7 @@ def train(
             if use_wandb:
                 wandb.log(
                     {
-                        "epoch": epoch + 1,
+                        "epoch/epoch_num": epoch,
                         "train/loss": avg_epoch_loss,
                         "train/accuracy": 100.0 * epoch_corrects / total_samples,
                         "val/loss": val_loss,
@@ -203,7 +203,7 @@ def main():
             seed=42,
             batch_size=64,
             num_workers=16,
-            train_val_split=0.6,
+            train_val_split=0.9,
             rank=ddp_rank,
             world_size=ddp_world_size,
             test_setup=TEST_SETUP,
