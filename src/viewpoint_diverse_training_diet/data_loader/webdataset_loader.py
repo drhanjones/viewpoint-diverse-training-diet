@@ -122,7 +122,7 @@ class WebDatasetLoader:
         }
 
         if build_dataloaders:
-            self.build_dataloaders(batch_size)
+            self.build_dataloaders(batch_size, num_workers=8)
 
     @staticmethod
     def build_sample(sample, transforms, key_to_category_mapper, label_to_idx):
@@ -137,7 +137,11 @@ class WebDatasetLoader:
 
         return x, y
 
-    def build_dataloaders(self, batch_size: int):
+    def build_dataloaders(self, batch_size: int, num_workers: int):
+
+        train_workers = min(num_workers, len(self.train_urls))
+        val_workers = min(num_workers, len(self.val_urls))
+
         build_fn = partial(
             self.build_sample,
             transforms=self.transforms,
@@ -166,14 +170,14 @@ class WebDatasetLoader:
             train_dataset,
             batch_size=None,
             pin_memory=True,
-            num_workers=8,
+            num_workers=train_workers,
             multiprocessing_context="fork",
         )
         self.val_dataloader = DataLoader(
             val_dataset,
             batch_size=None,
             pin_memory=True,
-            num_workers=8,
+            num_workers=val_workers,
             multiprocessing_context="fork",
         )
 
@@ -289,6 +293,9 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
     ):
         """Rebuild dataloaders with num_workers and proper batching"""
 
+        train_workers = min(num_workers, len(self.train_urls) // self.world_size)
+        val_workers = min(num_workers, len(self.val_urls) // self.world_size)
+
         build_fn = partial(
             self.build_sample,
             transforms=self.transforms,
@@ -310,7 +317,7 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
         self.train_dataloader = wds.WebLoader(
             train_dataset,
             batch_size=None,
-            num_workers=num_workers,
+            num_workers=train_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
         ).with_epoch(total_sample_count[0] // (batch_size * self.world_size))
