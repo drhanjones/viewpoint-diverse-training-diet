@@ -8,7 +8,7 @@ from viewpoint_diverse_training_diet.data_loader.webdataset_loader import (
     WebDatasetLoader,
 )
 import wandb
-import datetime
+import time
 from pathlib import Path
 import os
 from torch.distributed import init_process_group, destroy_process_group
@@ -79,6 +79,7 @@ def train(
 ):
 
     for epoch in range(n_epoch):
+        epoch_start_time = time.time()
         model.train()
         if is_root_process:
             print(f"Epoch {epoch + 1}/{n_epoch}")
@@ -140,6 +141,8 @@ def train(
         val_loss, val_accuracy = validate(
             model, val_dataloader, device, ddp, criterion, is_root_process
         )
+        epoch_end_time = time.time()
+        epoch_duration = epoch_end_time - epoch_start_time
         if is_root_process:
             avg_epoch_loss = epoch_loss / total_samples
             print(
@@ -156,6 +159,7 @@ def train(
                         "train/accuracy": 100.0 * epoch_corrects / total_samples,
                         "val/loss": val_loss,
                         "val/accuracy": val_accuracy,
+                        "epoch/duration_seconds": epoch_duration,
                     }
                 )
 
