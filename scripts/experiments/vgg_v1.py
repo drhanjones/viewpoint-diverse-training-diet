@@ -11,9 +11,10 @@ import wandb
 import datetime
 from pathlib import Path
 import os
-from torch.distributed import init_process_group
+from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from viewpoint_diverse_training_diet.utils.util import build_names
+
 
 def make_vgg16(num_classes: int):
     model = models.vgg16(weights=None)
@@ -22,7 +23,14 @@ def make_vgg16(num_classes: int):
     return model
 
 
-def validate(model, val_loader, device, ddp, criterion):
+def validate(
+    model: nn.Module,
+    val_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    ddp: bool,
+    criterion: nn.Module,
+    is_root_process: bool,
+):
     """All ranks validate on their portion of data"""
     model.eval()
 
@@ -31,7 +39,7 @@ def validate(model, val_loader, device, ddp, criterion):
     total = 0
 
     with torch.no_grad():
-        for images, labels in val_loader:
+        for images, labels in tqdm(val_loader, disable=not is_root_process):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
@@ -60,27 +68,29 @@ def train(
     model: nn.Module,
     train_dataloader: torch.utils.data.DataLoader,
     val_dataloader: torch.utils.data.DataLoader,
-    criterion,
+    criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     n_epoch: int,
     ddp: bool,
-    is_master: bool,
+    is_root_process: bool,
     use_wandb: bool = True,
     logging_interval: int = 100,
 ):
 
-    model.train()
-
     for epoch in range(n_epoch):
-        print(f"Epoch {epoch + 1}/{n_epoch}")
+        model.train()
+        if is_root_process:
+            print(f"Epoch {epoch + 1}/{n_epoch}")
+
         epoch_loss = 0.0
         epoch_corrects = 0
         num_batches = 0
         total_samples = 0
 
-
-        for batch_idx, (inputs, targets) in enumerate(tqdm(train_dataloader)):
+        for batch_idx, (inputs, targets) in enumerate(
+            tqdm(train_dataloader, disable=not is_root_process)
+        ):
             inputs = inputs.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
 
@@ -91,49 +101,61 @@ def train(
 
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            epoch_loss += loss.item() * inputs.size(0)  # Weighted by batch size
             epoch_corrects += corrects
             total_samples += inputs.size(0)
             num_batches += 1
 
             if use_wandb and (batch_idx + 1) % logging_interval == 0:
-                if is_master:
+                if is_root_process:
                     wandb.log(
                         {
                             "batch/train_loss": loss.item(),
-                            "batch/avg_loss": epoch_loss / num_batches,
+                            "batch/moving_avg_loss": epoch_loss / total_samples,
                             "batch/train_accuracy": 100.0 * corrects / inputs.size(0),
+                            "batch/moving_avg_accuracy": 100.0
+                            * epoch_corrects
+                            / total_samples,
                         }
                     )
-                    print(f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}%")
+                    print(
+                        f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}% \n"
+                    )
             elif (batch_idx + 1) % logging_interval == 0:
-                print(f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}%")
+                print(
+                    f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}% \n"
+                )
+        print(f"Completed epoch {epoch + 1} on Rank {os.environ.get('RANK', 'N/A')} \n")
 
-
-        # avg_epoch_loss = epoch_loss / num_batches
-        # print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}")
         if ddp:
-            metrics = torch.tensor([epoch_loss, epoch_corrects, total_samples], device=device)
+            torch.distributed.barrier()
+            metrics = torch.tensor(
+                [epoch_loss, epoch_corrects, total_samples], device=device
+            )
             torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
             epoch_loss, epoch_corrects, total_samples = metrics.tolist()
 
-
-
-        avg_epoch_loss = epoch_loss / num_batches
-        print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}, accuracy: {100.0 * epoch_corrects / total_samples:.2f}%")
-        if use_wandb and is_master:
-            wandb.log(
-                {
-                    "epoch": epoch + 1,
-                    "train/loss": avg_epoch_loss,
-                    "train/accuracy": 100.0 * epoch_corrects / total_samples,
-                }
+        if is_root_process:
+            avg_epoch_loss = epoch_loss / total_samples
+            print(
+                f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}, accuracy: {100.0 * epoch_corrects / total_samples:.2f}% \n"
             )
+            if use_wandb:
+                wandb.log(
+                    {
+                        "epoch": epoch + 1,
+                        "train/loss": avg_epoch_loss,
+                        "train/accuracy": 100.0 * epoch_corrects / total_samples,
+                    }
+                )
 
-        # Validate after each epoch
-        val_loss, val_accuracy = validate(model, val_dataloader, device, ddp, criterion)
-        if is_master:
-            print(f"  Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.2f}%")
+        val_loss, val_accuracy = validate(
+            model, val_dataloader, device, ddp, criterion, is_root_process
+        )
+        if is_root_process:
+            print(
+                f"  Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.2f}% \n"
+            )
             if use_wandb:
                 wandb.log(
                     {
@@ -161,7 +183,7 @@ def main():
     )
     # NUM_CLASSES = 25
 
-    TEST_SETUP = True
+    TEST_SETUP = False
     ddp = int(os.environ.get("RANK", -1)) != -1
 
     if ddp:
@@ -173,7 +195,7 @@ def main():
         device = torch.device(
             f"cuda:{ddp_local_rank}" if torch.cuda.is_available() else "cpu"
         )
-        master_process = ddp_rank == 0
+        is_root_process = ddp_rank == 0
         seed_offset = ddp_rank
         torch.accelerator.set_device_index(ddp_local_rank)
         torch.manual_seed(42 + seed_offset)
@@ -182,15 +204,15 @@ def main():
             key_to_category_mapper_path=KEY_TO_CATEGORY_MAPPER_PATH,
             seed=42,
             batch_size=64,
-            num_workers=8,
-            train_val_split=0.9,
+            num_workers=16,
+            train_val_split=0.6,
             rank=ddp_rank,
             world_size=ddp_world_size,
             test_setup=TEST_SETUP,
         )
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        master_process = True
+        is_root_process = True
         seed_offset = 0
         ddp_rank = 0
         ddp_world_size = 1
@@ -213,15 +235,14 @@ def main():
 
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
-    
 
     print("Starting training...")
     use_wandb = True
     names_cfg = build_names(model_name="vgg16")
-    if use_wandb and master_process:
+    if use_wandb and is_root_process:
         wandb.init(
             project="viewpoint-diverse-training-diet",
-            name=names_cfg['experiment_name'],
+            name=names_cfg["experiment_name"],
             entity="curriculum-of-vision",
             config={
                 "architecture": "VGG16",
@@ -245,7 +266,7 @@ def main():
         device=device,
         n_epoch=2,
         ddp=ddp,
-        is_master=master_process,
+        is_root_process=is_root_process,
         use_wandb=use_wandb,
     )
 
@@ -255,12 +276,15 @@ def main():
     if ddp:
         torch.distributed.barrier()
 
-    if save_checkpoint and master_process:
+    if save_checkpoint and is_root_process:
         checkpoint_path = Path(f"{names_cfg['checkpoint_path']}")
         if not checkpoint_path.parent.exists():
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(raw_model.state_dict(), checkpoint_path)
         print(f"Model checkpoint saved to {checkpoint_path}")
+
+    if ddp:
+        destroy_process_group()
 
 
 if __name__ == "__main__":
