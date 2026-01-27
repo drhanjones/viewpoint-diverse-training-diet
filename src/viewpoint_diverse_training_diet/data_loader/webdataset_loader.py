@@ -98,7 +98,7 @@ class WebDatasetLoader:
         url_paths: List[Path] = sorted(self.dataset_path.glob("*.tar"))
         self.urls: List[str] = ["file://" + str(url) for url in url_paths]
         if test_setup:
-            self.urls = self.urls[:20]
+            self.urls = self.urls[:60]
 
         self.train_urls, self.val_urls = self.shuffle_and_split_dataset(
             train_val_split, seed
@@ -127,27 +127,29 @@ class WebDatasetLoader:
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
+            .batched(batch_size)
         )
 
         val_dataset = (
-            wds.WebDataset(self.val_urls, shardshuffle=False, nodesplitter = wds.split_by_worker)  # type: ignore
+            wds.WebDataset(self.val_urls, shardshuffle=False)  # type: ignore
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
+            .batched(batch_size)
         )
 
         self.train_dataloader = DataLoader(
             train_dataset,
-            batch_size=batch_size,
+            batch_size=None,
             pin_memory=True,
             num_workers=8,
             multiprocessing_context="fork"
         )
         self.val_dataloader = DataLoader(
             val_dataset,
-            batch_size=batch_size,
+            batch_size=None,
             pin_memory=True,
-            num_workers=3,
+            num_workers=8,
             multiprocessing_context="fork"
         )
 
@@ -158,8 +160,11 @@ class WebDatasetLoader:
         rng = random.Random(seed)
         rng.shuffle(shuffled_urls)
         split_index = int(len(shuffled_urls) * train_val_split)
+        print(f"Total shards: {len(shuffled_urls)}, Train shards: {split_index}, Val shards: {len(shuffled_urls) - split_index}")
         train_urls = shuffled_urls[:split_index]
+        print(f"First train shard: {train_urls[0]}, Last train shard: {train_urls[-1]}")
         val_urls = shuffled_urls[split_index:]
+        print(f"First val shard: {val_urls[0]}, Last val shard: {val_urls[-1]}")
         return train_urls, val_urls
 
     def build_label_encoder(
@@ -234,7 +239,9 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
 
         # Split by rank
         train_urls = self.get_shards_for_rank(train_urls)
+        print(f"Rank {self.rank}: {len(train_urls)} train shards assigned")
         val_urls = self.get_shards_for_rank(val_urls)
+        print(f"Rank {self.rank}: {len(val_urls)} val shards assigned")
 
         return train_urls, val_urls
 
@@ -257,11 +264,12 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
+            .batched(batch_size)
         )
 
         self.train_dataloader = DataLoader(
             train_dataset,
-            batch_size=batch_size,
+            batch_size=None,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
@@ -273,11 +281,12 @@ class DistributedWebDatasetLoader(WebDatasetLoader):
             .decode("pil")
             .to_tuple("png", "metadata.json", "__key__")
             .map(self.build_sample)
+            .batched(batch_size)
         )
 
         self.val_dataloader = DataLoader(
             val_dataset,
-            batch_size=batch_size,
+            batch_size=None,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,

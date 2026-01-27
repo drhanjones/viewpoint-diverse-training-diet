@@ -13,7 +13,7 @@ from pathlib import Path
 import os
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-
+from viewpoint_diverse_training_diet.utils.util import build_names
 
 def make_vgg16(num_classes: int):
     model = models.vgg16(weights=None)
@@ -75,7 +75,10 @@ def train(
     for epoch in range(n_epoch):
         print(f"Epoch {epoch + 1}/{n_epoch}")
         epoch_loss = 0.0
+        epoch_corrects = 0
         num_batches = 0
+        total_samples = 0
+
 
         for batch_idx, (inputs, targets) in enumerate(tqdm(train_dataloader)):
             inputs = inputs.to(device, non_blocking=True)
@@ -84,10 +87,13 @@ def train(
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
+            corrects = outputs.argmax(dim=1).eq(targets).sum().item()
 
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+            epoch_corrects += corrects
+            total_samples += inputs.size(0)
             num_batches += 1
 
             if use_wandb and (batch_idx + 1) % logging_interval == 0:
@@ -96,20 +102,33 @@ def train(
                         {
                             "batch/train_loss": loss.item(),
                             "batch/avg_loss": epoch_loss / num_batches,
+                            "batch/train_accuracy": 100.0 * corrects / inputs.size(0),
                         }
                     )
+                    print(f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}%")
             elif (batch_idx + 1) % logging_interval == 0:
-                print(f"Batch {batch_idx + 1}, loss: {loss.item():.4f}")
+                print(f"Batch {batch_idx + 1}, batch loss: {loss.item():.4f}, batch accuracy: {100.0 * corrects / inputs.size(0):.2f}%")
+
 
         # avg_epoch_loss = epoch_loss / num_batches
         # print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}")
         if ddp:
-            loss_tensor = torch.tensor(epoch_loss, device=device)
-            torch.distributed.all_reduce(loss_tensor)
-            epoch_loss = loss_tensor.item() / torch.distributed.get_world_size()
+            metrics = torch.tensor([epoch_loss, epoch_corrects, total_samples], device=device)
+            torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
+            epoch_loss, epoch_corrects, total_samples = metrics.tolist()
+
+
 
         avg_epoch_loss = epoch_loss / num_batches
-        print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}")
+        print(f"  Epoch {epoch + 1} average loss: {avg_epoch_loss:.4f}, accuracy: {100.0 * epoch_corrects / total_samples:.2f}%")
+        if use_wandb and is_master:
+            wandb.log(
+                {
+                    "epoch": epoch + 1,
+                    "train/loss": avg_epoch_loss,
+                    "train/accuracy": 100.0 * epoch_corrects / total_samples,
+                }
+            )
 
         # Validate after each epoch
         val_loss, val_accuracy = validate(model, val_dataloader, device, ddp, criterion)
@@ -186,7 +205,6 @@ def main():
         )
 
     NUM_CLASSES = wds_loader.get_num_classes()
-    datetime_now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     model = make_vgg16(NUM_CLASSES)
     model = model.to(device)
@@ -199,11 +217,11 @@ def main():
 
     print("Starting training...")
     use_wandb = True
-
+    names_cfg = build_names(model_name="vgg16")
     if use_wandb and master_process:
         wandb.init(
             project="viewpoint-diverse-training-diet",
-            name=f"vgg16-from-scratch-{datetime_now}-ddp{ddp_world_size}",
+            name=names_cfg['experiment_name'],
             entity="curriculum-of-vision",
             config={
                 "architecture": "VGG16",
@@ -238,7 +256,9 @@ def main():
         torch.distributed.barrier()
 
     if save_checkpoint and master_process:
-        checkpoint_path = Path("./vgg16_from_scratch.pth")
+        checkpoint_path = Path(f"{names_cfg['checkpoint_path']}")
+        if not checkpoint_path.parent.exists():
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(raw_model.state_dict(), checkpoint_path)
         print(f"Model checkpoint saved to {checkpoint_path}")
 
